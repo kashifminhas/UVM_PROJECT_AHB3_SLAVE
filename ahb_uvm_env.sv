@@ -3,7 +3,7 @@ class ahb_env extends uvm_env;
    `uvm_component_utils(ahb_env);
  
     //ENV has agent as its sub component
-    ahb_agent      agent;
+//    ahb_agent      agent;
     ahb_scoreboard scoreboard;
 //    int num_packets;
 //      int num_packet_count; 
