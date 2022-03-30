@@ -5,7 +5,8 @@ class ahb_env extends uvm_env;
     //ENV has agent as its sub component
     ahb_agent      agent;
     ahb_scoreboard scoreboard;
-//    int num_packets; 
+//    int num_packets;
+//      int num_packet_count; 
 //    ahb_subscriber subscriber;
    
     //virtual interface for AHB interface
