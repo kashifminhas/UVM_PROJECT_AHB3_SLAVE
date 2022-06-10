@@ -1,210 +1,254 @@
-////////////////////////////////////////////////////////////////////////////
-//                                                                          //
-//  AMBA AHB bus slave model (simple memory model)                          //
-//                                                                          //
-//  Copyright (C) 2008  Iztok Jeras                                         //
-//                                                                          //
-//////////////////////////////////////////////////////////////////////////////
-//                                                                          //
-//  This RTL is free hardware: you can redistribute it and/or modify        //
-//  it under the terms of the GNU Lesser General Public License             //
-//  as published by the Free Software Foundation, either                    //
-//  version 3 of the License, or (at your option) any later version.        //
-//                                                                          //
-//  This RTL is distributed in the hope that it will be useful,             //
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of          //
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the           //
-//  GNU General Public License for more details.                            //
-//                                                                          //
-//  You should have received a copy of the GNU General Public License       //
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.   //
-//                                                                          //
-//////////////////////////////////////////////////////////////////////////////
+// Copyright lowRISC contributors.
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
 
-`include "amba_ahb_defines.v"
+/**
+ * Top level module of the ibex RISC-V core with tracing enabled
+ */
+`include "ibex_pkg.sv"
+`include "ibex_alu.sv"
+`include "ibex_compressed_decoder.sv"
+`include "ibex_controller.sv"
+`include "ibex_counter.sv"
+`include "ibex_cs_registers.sv"
+`include "ibex_csr.sv"
+`include "ibex_decoder.sv"
+`include "ibex_ex_block.sv"
+`include "ibex_id_stage.sv"
+`include "ibex_if_stage.sv"
+`include "ibex_load_store_unit.sv"
+`include "ibex_multdiv_slow.sv"
+`include "ibex_multdiv_fast.sv"
+`include "ibex_prefetch_buffer.sv"
+`include "ibex_fetch_fifo.sv"
+`include "ibex_register_file_ff.sv"
+`include "ibex_wb_stage.sv"
+`include "ibex_core.sv"
+`include "prim_ram_1p_pkg.sv"
+`include "ibex_top.sv"
+`include "ibex_tracer.sv"
 
-module amba_ahb_slave #(
-  // bus paramaters
-  parameter AW = `AW,    // address bus width
-  parameter DW = `DW,    // data bus width
-  parameter DE = `DE,    // endianess
-  parameter RW = `RW,    // response width
-  // memory parameters
-  parameter MS = 1024,  // memory size (in Bytes)
-  parameter AM = {10{1'b1}},  // address mask
-  // write and read latencies for sequential and nonsequential accesses
-  parameter LW_NS = 0,  // write latency for nonsequential transfers
-  parameter LW_S  = 0,  // write latency for sequential transfers
-  parameter LR_NS = 0,  // read latency for nonsequential transfers
-  parameter LR_S  = 0   // read latency for sequential transfers
-)(
-  // AMBA AHB system signals
-  input  wire          hclk,     // Bus clock
-  input  wire          hresetn,  // Reset (active low)
-  // AMBA AHB decoder signal
-  input  wire          hsel,     // Slave select
-  // AMBA AHB master signals
-  input  wire [AW-1:0] haddr,    // Address bus
-  input  wire    [1:0] htrans,   // Transfer type
-  input  wire          hwrite,   // Transfer direction
-  input  wire    [2:0] hsize,    // Transfer size
-  input  wire    [2:0] hburst,   // Burst type
-  input  wire    [3:0] hprot,    // Protection control
-  input  wire [DW-1:0] hwdata,   // Write data bus
-  // AMBA AHB slave signals
-  output wire [DW-1:0] hrdata,   // Read data bus
-  output reg           hready,   // Transfer done
-  output reg  [RW-1:0] hresp,    // Transfer response
-  // slave control signal
-  input  wor           error     // request an error response
+
+module ibex_top_tracing #(
+    parameter bit                 PMPEnable        = 1'b0,
+    parameter int unsigned        PMPGranularity   = 0,
+    parameter int unsigned        PMPNumRegions    = 4,
+    parameter int unsigned        MHPMCounterNum   = 0,
+    parameter int unsigned        MHPMCounterWidth = 40,
+    parameter bit                 RV32E            = 1'b0,
+    parameter ibex_pkg::rv32m_e   RV32M            = ibex_pkg::RV32MFast,
+    parameter ibex_pkg::rv32b_e   RV32B            = ibex_pkg::RV32BNone,
+    parameter ibex_pkg::regfile_e RegFile          = ibex_pkg::RegFileFF,
+    parameter bit                 BranchTargetALU  = 1'b0,
+    parameter bit                 WritebackStage   = 1'b0,
+    parameter bit                 ICache           = 1'b0,
+    parameter bit                 ICacheECC        = 1'b0,
+    parameter bit                 BranchPredictor  = 1'b0,
+    parameter bit                 DbgTriggerEn     = 1'b0,
+    parameter int unsigned        DbgHwBreakNum    = 1,
+    parameter bit                 SecureIbex       = 1'b0,
+    parameter int unsigned        DmHaltAddr       = 32'h1A110800,
+    parameter int unsigned        DmExceptionAddr  = 32'h1A110808
+) (
+    // Clock and Reset
+    input  logic                         clk_i,
+    input  logic                         rst_ni,
+
+    input  logic                         test_en_i,     // enable all clock gates for testing
+    input  logic                         scan_rst_ni,
+    input  prim_ram_1p_pkg::ram_1p_cfg_t ram_cfg_i,
+
+
+    input  logic [31:0]                  hart_id_i,
+    input  logic [31:0]                  boot_addr_i,
+
+    // Instruction memory interface
+    output logic                         instr_req_o,
+    input  logic                         instr_gnt_i,
+    input  logic                         instr_rvalid_i,
+    output logic [31:0]                  instr_addr_o,
+    input  logic [31:0]                  instr_rdata_i,
+    input  logic                         instr_err_i,
+
+    // Data memory interface
+    output logic                         data_req_o,
+    input  logic                         data_gnt_i,
+    input  logic                         data_rvalid_i,
+    output logic                         data_we_o,
+    output logic [3:0]                   data_be_o,
+    output logic [31:0]                  data_addr_o,
+    output logic [31:0]                  data_wdata_o,
+    input  logic [31:0]                  data_rdata_i,
+    input  logic                         data_err_i,
+
+    // Interrupt inputs
+    input  logic                         irq_software_i,
+    input  logic                         irq_timer_i,
+    input  logic                         irq_external_i,
+    input  logic [14:0]                  irq_fast_i,
+    input  logic                         irq_nm_i,       // non-maskeable interrupt
+
+    // Debug Interface
+    input  logic                         debug_req_i,
+    output ibex_pkg::crash_dump_t        crash_dump_o,
+
+    // CPU Control Signals
+    input  logic                         fetch_enable_i,
+    output logic                         alert_minor_o,
+    output logic                         alert_major_o,
+    output logic                         core_sleep_o
+
 );
 
-//////////////////////////////////////////////////////////////////////////////
-// local parameters and signals                                             //
-//////////////////////////////////////////////////////////////////////////////
+  import ibex_pkg::*;
 
-localparam SW = DW/8;  // byte select width (data bus width in Bytes)
+  // ibex_tracer relies on the signals from the RISC-V Formal Interface
+  //`ifndef RVFI
+  //  $fatal("Fatal error: RVFI needs to be defined globally.");
+  //`endif
 
-// slave control signal
-wor           error_req;
+  logic        rvfi_valid;
+  logic [63:0] rvfi_order;
+  logic [31:0] rvfi_insn;
+  logic        rvfi_trap;
+  logic        rvfi_halt;
+  logic        rvfi_intr;
+  logic [ 1:0] rvfi_mode;
+  logic [ 1:0] rvfi_ixl;
+  logic [ 4:0] rvfi_rs1_addr;
+  logic [ 4:0] rvfi_rs2_addr;
+  logic [ 4:0] rvfi_rs3_addr;
+  logic [31:0] rvfi_rs1_rdata;
+  logic [31:0] rvfi_rs2_rdata;
+  logic [31:0] rvfi_rs3_rdata;
+  logic [ 4:0] rvfi_rd_addr;
+  logic [31:0] rvfi_rd_wdata;
+  logic [31:0] rvfi_pc_rdata;
+  logic [31:0] rvfi_pc_wdata;
+  logic [31:0] rvfi_mem_addr;
+  logic [ 3:0] rvfi_mem_rmask;
+  logic [ 3:0] rvfi_mem_wmask;
+  logic [31:0] rvfi_mem_rdata;
+  logic [31:0] rvfi_mem_wdata;
 
-assign error_req = 1'b0;
-assign error_req = error;          // default error value
+  ibex_top #(
+    .PMPEnable        ( PMPEnable        ),
+    .PMPGranularity   ( PMPGranularity   ),
+    .PMPNumRegions    ( PMPNumRegions    ),
+    .MHPMCounterNum   ( MHPMCounterNum   ),
+    .MHPMCounterWidth ( MHPMCounterWidth ),
+    .RV32E            ( RV32E            ),
+    .RV32M            ( RV32M            ),
+    .RV32B            ( RV32B            ),
+    .RegFile          ( RegFile          ),
+    .BranchTargetALU  ( BranchTargetALU  ),
+    .ICache           ( ICache           ),
+    .ICacheECC        ( ICacheECC        ),
+    .BranchPredictor  ( BranchPredictor  ),
+    .DbgTriggerEn     ( DbgTriggerEn     ),
+    .DbgHwBreakNum    ( DbgHwBreakNum    ),
+    .WritebackStage   ( WritebackStage   ),
+    .SecureIbex       ( SecureIbex       ),
+    .DmHaltAddr       ( DmHaltAddr       ),
+    .DmExceptionAddr  ( DmExceptionAddr  )
+  ) u_ibex_top (
+    .clk_i,
+    .rst_ni,
 
-// cycle and burst length couners
-// TODO should be integers
-wire [32-1:0] delay;    // expected delay for observed cycle
-wire [32-1:0] cnt_t;    // time counter reload input
-reg  [32-1:0] cnt_t_r;  // time counter register
+    .test_en_i,
+    .scan_rst_ni,
+    .ram_cfg_i,
 
-// registered AHB input signals
-reg           hsel_r;
-reg  [AW-1:0] haddr_r;
-reg     [1:0] htrans_r;
-reg           hwrite_r;
-reg     [2:0] hsize_r;
-reg     [2:0] hburst_r;
-reg     [2:0] hprot_r;
+    .hart_id_i,
+    .boot_addr_i,
 
-// slave memory
-reg     [7:0] mem [0:MS-1];
+    .instr_req_o,
+    .instr_gnt_i,
+    .instr_rvalid_i,
+    .instr_addr_o,
+    .instr_rdata_i,
+    .instr_err_i,
 
-genvar i;
+    .data_req_o,
+    .data_gnt_i,
+    .data_rvalid_i,
+    .data_we_o,
+    .data_be_o,
+    .data_addr_o,
+    .data_wdata_o,
+    .data_rdata_i,
+    .data_err_i,
 
-wire    [7:0] bytes;
-wire [DW-1:0] wdata;    // write data buse used for endian byte swap
-wire [DW-1:0] rdata;    // read data buse used for endian byte swap
-wire          trn;      // read or write transfer
-wire          trn_req;  // transfer request
-wire          trn_ack;  // transfer acknowledge
+    .irq_software_i,
+    .irq_timer_i,
+    .irq_external_i,
+    .irq_fast_i,
+    .irq_nm_i,
 
-//////////////////////////////////////////////////////////////////////////////
-// pipelining input signals                                                 //
-//////////////////////////////////////////////////////////////////////////////
+    .debug_req_i,
+    .crash_dump_o,
 
-always @(negedge hresetn, posedge hclk)
-if (~hresetn) begin
-  htrans_r <= `H_IDLE;
-  for(int i=0;i<1024;i++) mem[i]=i;
-end else if (hready) begin
-  hsel_r   <= hsel;
-  haddr_r  <= haddr;
-  htrans_r <= htrans;
-  hwrite_r <= hwrite;
-  hsize_r  <= hsize;
-  hburst_r <= hburst;
-  hprot_r  <= hprot;
-end
+    .rvfi_valid,
+    .rvfi_order,
+    .rvfi_insn,
+    .rvfi_trap,
+    .rvfi_halt,
+    .rvfi_intr,
+    .rvfi_mode,
+    .rvfi_ixl,
+    .rvfi_rs1_addr,
+    .rvfi_rs2_addr,
+    .rvfi_rs3_addr,
+    .rvfi_rs1_rdata,
+    .rvfi_rs2_rdata,
+    .rvfi_rs3_rdata,
+    .rvfi_rd_addr,
+    .rvfi_rd_wdata,
+    .rvfi_pc_rdata,
+    .rvfi_pc_wdata,
+    .rvfi_mem_addr,
+    .rvfi_mem_rmask,
+    .rvfi_mem_wmask,
+    .rvfi_mem_rdata,
+    .rvfi_mem_wdata,
 
-//////////////////////////////////////////////////////////////////////////////
-// slave response timing                                                    //
-//////////////////////////////////////////////////////////////////////////////
+    .fetch_enable_i,
+    .alert_minor_o,
+    .alert_major_o,
+    .core_sleep_o
+  );
 
-// cycle and burst length couners
-// generating the response signals with the proper timing
-always @(negedge hresetn, posedge hclk)
-if (~hresetn) begin
-  cnt_t_r <= 0;
-  hready  <= 1'b1;
-  hresp   <= `H_OKAY;
-end else begin
-  // apply a new value to the counter register
-  cnt_t_r <= cnt_t;
-  // error response: wait periods + two ERROR periods
-  if (error) begin
-    if (hready) begin
-      if ((htrans == `H_IDLE) | (htrans == `H_BUSY)) begin
-        hresp   <= `H_OKAY;
-        hready  <= 1'b1;
-      end
-      if ((htrans == `H_NONSEQ) | (htrans == `H_SEQ)) begin
-        hresp   <= (cnt_t == 0) ? `H_ERROR : `H_OKAY;
-        hready  <= 1'b0;
-      end
-    end else begin
-      if ((htrans_r == `H_NONSEQ) | (htrans_r == `H_SEQ)) begin
-        if (hresp == `H_OKAY) begin
-          hresp   <= (cnt_t == 0) ? `H_ERROR : `H_OKAY;
-        end else begin
-          hready  <= 1'b1;
-        end
-      end
-    end
-  // okay response: wait periods + one OKAY period
-  end else begin
-    hresp   <= `H_OKAY;
-    hready  <= (cnt_t == 0);
-  end
-end
+  ibex_tracer
+  u_ibex_tracer (
+    .clk_i,
+    .rst_ni,
 
-assign delay = htrans[0] ? (hwrite ? LW_S  : LR_S )
-                         : (hwrite ? LW_NS : LR_NS);
+    .hart_id_i,
 
-assign cnt_t = hready ? (htrans[1] & hsel ? delay
-                                          : 0)
-                      : cnt_t_r - 1;
-
-//////////////////////////////////////////////////////////////////////////////
-// memory and data bus implementation                                       //
-//////////////////////////////////////////////////////////////////////////////
-
-assign trn_req = ((htrans_r == `H_NONSEQ) | (htrans_r == `H_SEQ)) & hsel_r;
-assign trn_ack = hready;
-assign trn     = trn_req & trn_ack;
-
-assign bytes = 1 << hsize_r;
-
-// endian byte swap
-generate
-  for (i=0; i<SW; i=i+1) begin
-    if (DE == "BIG") begin
-//      assign  wdata [DW-1-8*i-:8] = hwdata [8*i+:8];
-//      assign hrdata [DW-1-8*i-:8] =  rdata [8*i+:8];
-    end else if (DE == "LITTLE") begin
-//      assign  wdata [     8*i+:8] = hwdata [8*i+:8];
-//      assign hrdata [     8*i-:8] =  rdata [8*i+:8];
-    end
-  end
-        assign  wdata  =  hwdata ;
-        assign  hrdata =  rdata ;
-endgenerate
-
-// write to memory
-generate
-  for (i=0; i<SW; i=i+1) begin
-    always @(posedge hclk) begin
-      if (trn & (hresp == `H_OKAY) & hwrite_r) begin
-        if (((haddr_r&AM)%SW <= i) & (i < ((haddr_r&AM)%SW + bytes)))  mem [(haddr_r&AM)/SW*SW+i] <= wdata [8*i+:8];
-      end
-    end
-  end
-endgenerate
-
-// read from memory
-generate
-  for (i=0; i<SW; i=i+1) begin
-    assign rdata [8*i+:8] = ((trn & (hresp == `H_OKAY) & ~hwrite_r) & ((haddr_r&AM)%SW <= i) & (i < ((haddr_r&AM)%SW + bytes))) ? mem [(haddr_r&AM)/SW*SW+i] : 8'hxx;
-  end
-endgenerate
+    .rvfi_valid,
+    .rvfi_order,
+    .rvfi_insn,
+    .rvfi_trap,
+    .rvfi_halt,
+    .rvfi_intr,
+    .rvfi_mode,
+    .rvfi_ixl,
+    .rvfi_rs1_addr,
+    .rvfi_rs2_addr,
+    .rvfi_rs3_addr,
+    .rvfi_rs1_rdata,
+    .rvfi_rs2_rdata,
+    .rvfi_rs3_rdata,
+    .rvfi_rd_addr,
+    .rvfi_rd_wdata,
+    .rvfi_pc_rdata,
+    .rvfi_pc_wdata,
+    .rvfi_mem_addr,
+    .rvfi_mem_rmask,
+    .rvfi_mem_wmask,
+    .rvfi_mem_rdata,
+    .rvfi_mem_wdata
+  );
 
 endmodule
+
